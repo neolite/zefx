@@ -48,6 +48,159 @@ clicked.emit(5);  // → count = 5
 clicked.emit(3);  // → count = 8
 ```
 
+## JS-like facade
+
+If you prefer an Effector-style API surface, use `createApp` (or `createDomain` alias):
+
+```zig
+const std = @import("std");
+const zefx = @import("zefx");
+
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+defer _ = gpa.deinit();
+
+var domain = zefx.createDomain(gpa.allocator()); // alias of createApp
+defer domain.deinit();
+
+const inc = domain.createEvent(i32);
+const dec = domain.createEvent(i32);
+
+const count = domain.createStore(i32, 0);
+_ = count.on(inc, &struct { fn plus(s: i32, x: i32) ?i32 { return s + x; } }.plus);
+_ = count.on(dec, &struct { fn minus(s: i32, x: i32) ?i32 { return s - x; } }.minus);
+
+const doubled = domain.createStore(i32, 0);
+_ = domain.sample(.{
+    .clock = inc,
+    .source = count,
+    .fn_ = &struct { fn f(v: i32) i32 { return v * 2; } }.f,
+    .target = doubled,
+});
+
+const bigOnly = domain.createStore(i32, 0);
+_ = domain.guard(.{
+    .clock = inc,
+    .source = count,
+    .filter = &struct { fn f(v: i32) bool { return v >= 10; } }.f,
+    .target = bigOnly,
+});
+
+const lastInc = domain.restore(inc, 0);
+
+const sub = count.subscribe(&struct {
+    fn w(v: i32) void {
+        std.debug.print("$count = {d}\n", .{v});
+    }
+}.w);
+
+inc.emit(5); // count=5, doubled=10, guard blocked
+inc.emit(6); // count=11, doubled=22, guard passed (11)
+dec.emit(3); // count=8
+
+count.unsubscribe(sub);
+std.debug.print("doubled={d}, bigOnly={d}, lastInc={d}\n", .{
+    doubled.getState(), bigOnly.getState(), lastInc.getState(),
+});
+```
+
+Store and event aliases available:
+- `store.getState()` / `store.setState(v)`
+- `store.subscribe(cb)` / `store.unsubscribe(sub)`
+- `event.subscribe(cb)` / `event.unsubscribe(sub)`
+
+## Effector-style todo model example
+
+```zig
+const std = @import("std");
+const zefx = @import("zefx");
+
+const Todo = struct { id: u32, done: bool };
+const Todos = struct {
+    items: [64]Todo = undefined,
+    len: usize = 0,
+};
+
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+defer _ = gpa.deinit();
+var domain = zefx.createDomain(gpa.allocator());
+defer domain.deinit();
+
+const addTodo = domain.createEvent(u32);
+const toggleTodo = domain.createEvent(u32);
+const removeTodo = domain.createEvent(u32);
+
+const $todos = domain.createStore(Todos, .{});
+const $total = domain.createStore(usize, 0);
+const $completed = domain.createStore(usize, 0);
+
+_ = $todos.on(addTodo, &struct {
+    fn r(state: Todos, id: u32) ?Todos {
+        if (state.len >= state.items.len) return state;
+        var next = state;
+        next.items[next.len] = .{ .id = id, .done = false };
+        next.len += 1;
+        return next;
+    }
+}.r);
+_ = $todos.on(toggleTodo, &struct {
+    fn r(state: Todos, id: u32) ?Todos {
+        var next = state;
+        var i: usize = 0;
+        while (i < next.len) : (i += 1) {
+            if (next.items[i].id == id) {
+                next.items[i].done = !next.items[i].done;
+                break;
+            }
+        }
+        return next;
+    }
+}.r);
+_ = $todos.on(removeTodo, &struct {
+    fn r(state: Todos, id: u32) ?Todos {
+        var next = state;
+        var i: usize = 0;
+        while (i < next.len) : (i += 1) {
+            if (next.items[i].id == id) {
+                var j = i;
+                while (j + 1 < next.len) : (j += 1) {
+                    next.items[j] = next.items[j + 1];
+                }
+                next.len -= 1;
+                break;
+            }
+        }
+        return next;
+    }
+}.r);
+
+_ = domain.sample(.{
+    .source = $todos,
+    .fn_ = &struct { fn f(s: Todos) usize { return s.len; } }.f,
+    .target = $total,
+});
+_ = domain.sample(.{
+    .source = $todos,
+    .fn_ = &struct {
+        fn f(s: Todos) usize {
+            var done: usize = 0;
+            var i: usize = 0;
+            while (i < s.len) : (i += 1) if (s.items[i].done) done += 1;
+            return done;
+        }
+    }.f,
+    .target = $completed,
+});
+
+addTodo.emit(1);
+addTodo.emit(2);
+toggleTodo.emit(1);
+removeTodo.emit(2);
+
+std.debug.print("total={d}, completed={d}\n", .{
+    $total.getState(), $completed.getState(),
+});
+```
+
 ## API
 
 ### Core primitives

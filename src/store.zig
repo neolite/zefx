@@ -38,6 +38,11 @@ pub fn Store(comptime T: type) type {
             return self.value;
         }
 
+        /// JS-like alias for get().
+        pub fn getState(self: *const Self) T {
+            return self.get();
+        }
+
         /// Imperatively set a new value. Marks dirty and flushes if idle.
         pub fn set(self: *Self, val: T) void {
             self.prev = self.value;
@@ -48,6 +53,11 @@ pub fn Store(comptime T: type) type {
             }
         }
 
+        /// JS-like alias for set().
+        pub fn setState(self: *Self, val: T) void {
+            self.set(val);
+        }
+
         pub fn watch(self: *Self, cb: WatcherFn) Subscription {
             self.ensureRegistered();
             const idx = self.watchers.items.len;
@@ -55,10 +65,20 @@ pub fn Store(comptime T: type) type {
             return .{ .index = idx };
         }
 
+        /// JS-like alias for watch().
+        pub fn subscribe(self: *Self, cb: WatcherFn) Subscription {
+            return self.watch(cb);
+        }
+
         pub fn unwatch(self: *Self, sub: Subscription) void {
             if (sub.index < self.watchers.items.len) {
                 self.watchers.items[sub.index] = null;
             }
+        }
+
+        /// JS-like alias for unwatch().
+        pub fn unsubscribe(self: *Self, sub: Subscription) void {
+            self.unwatch(sub);
         }
 
         /// Returns an Event(T) that fires whenever this store updates.

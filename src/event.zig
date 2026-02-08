@@ -34,10 +34,20 @@ pub fn Event(comptime T: type) type {
             return .{ .index = idx };
         }
 
+        /// JS-like alias for watch().
+        pub fn subscribe(self: *Self, cb: WatcherFn) Subscription {
+            return self.watch(cb);
+        }
+
         pub fn unwatch(self: *Self, sub: Subscription) void {
             if (sub.index < self.watchers.items.len) {
                 self.watchers.items[sub.index] = null;
             }
+        }
+
+        /// JS-like alias for unwatch().
+        pub fn unsubscribe(self: *Self, sub: Subscription) void {
+            self.unwatch(sub);
         }
 
         /// Fire the event. Schedules pure (reducers) and effect (watchers) thunks.
