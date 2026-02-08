@@ -47,42 +47,41 @@ pub fn main() !void {
 
 ## JS-like facade
 
-If you prefer an Effector-style API surface, use `createApp` (or `createDomain` alias):
+Use `Runtime` for the shortest setup and an Effector-style API:
 
 ```zig
 const std = @import("std");
 const zefx = @import("zefx");
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-defer _ = gpa.deinit();
+var rt: zefx.Runtime = undefined;
+rt.init();
+defer rt.deinit();
+const fx = rt.fx();
 
-var domain = zefx.createDomain(gpa.allocator()); // alias of createApp
-defer domain.deinit();
+const inc = fx.createEvent(i32);
+const dec = fx.createEvent(i32);
 
-const inc = domain.createEvent(i32);
-const dec = domain.createEvent(i32);
-
-const count = domain.createStore(i32, 0);
+const count = fx.createStore(i32, 0);
 _ = count.on(inc, &struct { fn plus(s: i32, x: i32) ?i32 { return s + x; } }.plus);
 _ = count.on(dec, &struct { fn minus(s: i32, x: i32) ?i32 { return s - x; } }.minus);
 
-const doubled = domain.createStore(i32, 0);
-_ = domain.sample(.{
+const doubled = fx.createStore(i32, 0);
+_ = fx.sample(.{
     .clock = inc,
     .source = count,
     .fn_ = &struct { fn f(v: i32) i32 { return v * 2; } }.f,
     .target = doubled,
 });
 
-const bigOnly = domain.createStore(i32, 0);
-_ = domain.guard(.{
+const bigOnly = fx.createStore(i32, 0);
+_ = fx.guard(.{
     .clock = inc,
     .source = count,
     .filter = &struct { fn f(v: i32) bool { return v >= 10; } }.f,
     .target = bigOnly,
 });
 
-const lastInc = domain.restore(inc, 0);
+const lastInc = fx.restore(inc, 0);
 
 const sub = count.subscribe(&struct {
     fn w(v: i32) void {
@@ -105,7 +104,7 @@ Store and event aliases available:
 - `store.subscribe(cb)` / `store.unsubscribe(sub)`
 - `event.subscribe(cb)` / `event.unsubscribe(sub)`
 
-If you want calls without `&domain` at use sites, bind once:
+`Runtime` already gives a bound facade (`fx`) so you do not pass `&domain` around:
 
 ```zig
 var rt: zefx.Runtime = undefined;
@@ -149,18 +148,18 @@ const Todos = struct {
     len: usize = 0,
 };
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-defer _ = gpa.deinit();
-var domain = zefx.createDomain(gpa.allocator());
-defer domain.deinit();
+var rt: zefx.Runtime = undefined;
+rt.init();
+defer rt.deinit();
+const fx = rt.fx();
 
-const addTodo = domain.createEvent(u32);
-const toggleTodo = domain.createEvent(u32);
-const removeTodo = domain.createEvent(u32);
+const addTodo = fx.createEvent(u32);
+const toggleTodo = fx.createEvent(u32);
+const removeTodo = fx.createEvent(u32);
 
-const $todos = domain.createStore(Todos, .{});
-const $total = domain.createStore(usize, 0);
-const $completed = domain.createStore(usize, 0);
+const $todos = fx.createStore(Todos, .{});
+const $total = fx.createStore(usize, 0);
+const $completed = fx.createStore(usize, 0);
 
 _ = $todos.on(addTodo, &struct {
     fn r(state: Todos, id: u32) ?Todos {
@@ -202,12 +201,12 @@ _ = $todos.on(removeTodo, &struct {
     }
 }.r);
 
-_ = domain.sample(.{
+_ = fx.sample(.{
     .source = $todos,
     .fn_ = &struct { fn f(s: Todos) usize { return s.len; } }.f,
     .target = $total,
 });
-_ = domain.sample(.{
+_ = fx.sample(.{
     .source = $todos,
     .fn_ = &struct {
         fn f(s: Todos) usize {
@@ -236,6 +235,7 @@ std.debug.print("total={d}, completed={d}\n", .{
 
 | Primitive | Description |
 |-----------|-------------|
+| `Runtime` | Owns allocator + domain lifecycle. Use `rt.init()` / `rt.deinit()` |
 | `Engine` | Owns the reactive graph. Two-phase flush: pure reducers → effect watchers |
 | `Event(T)` | A signal carrying payload `T`. Emit to trigger the graph |
 | `Store(T)` | Holds state `T`. Updated by `.on(event, reducer)` or `.set(value)` |
@@ -247,28 +247,40 @@ std.debug.print("total={d}, completed={d}\n", .{
 When `clock` fires, snapshot `source`, apply `fn_`, push result to `target`.
 
 ```zig
-// clock fires → read $count → double it → push to doubled_ev
-_ = zefx.sample(&eng, .{
-    .clock  = &clicked,
-    .source = &$count,
+// setup once
+var rt: zefx.Runtime = undefined;
+rt.init();
+defer rt.deinit();
+const fx = rt.fx();
+
+const clicked = fx.createEvent(i32);
+const count = fx.createStore(i32, 0);
+const doubled_ev = fx.createEvent(i32);
+
+// clock fires -> read count -> double it -> push to doubled_ev
+_ = fx.sample(.{
+    .clock  = clicked,
+    .source = count,
     .fn_    = &struct {
         fn f(src: i32) i32 { return src * 2; }
     }.f,
-    .target = &doubled_ev,
+    .target = doubled_ev,
 });
 ```
 
 Target can be an `Event` or a `Store`. If omitted, `sample` auto-creates and returns a new `*Event(R)`:
 
 ```zig
-const squared = zefx.sample(&eng, .{
-    .clock  = &clicked,
-    .source = &$count,
+const squared = fx.sample(.{
+    .clock  = clicked,
+    .source = count,
     .fn_    = &struct {
         fn f(src: i32) i32 { return src * src; }
     }.f,
 });
-_ = squared.watch(&log);
+_ = squared.watch(&struct {
+    fn log(v: i32) void { _ = v; }
+}.log);
 ```
 
 #### `guard` — conditional pass-through
@@ -276,13 +288,14 @@ _ = squared.watch(&log);
 Like `sample`, but with a `filter` instead of `fn_`. Only passes values where filter returns `true`:
 
 ```zig
-_ = zefx.guard(&eng, .{
-    .clock  = &clicked,
-    .source = &$count,
+const big_values_ev = fx.createEvent(i32);
+_ = fx.guard(.{
+    .clock  = clicked,
+    .source = count,
     .filter = &struct {
         fn f(v: i32) bool { return v > 5; }
     }.f,
-    .target = &big_values_ev,
+    .target = big_values_ev,
 });
 ```
 
@@ -291,9 +304,11 @@ _ = zefx.guard(&eng, .{
 Combine multiple stores into a single snapshot:
 
 ```zig
-_ = zefx.sample(&eng, .{
-    .clock  = &clicked,
-    .source = .{ .a = &$count, .b = &$other },
+const other = fx.createStore(i32, 10);
+const sum_ev = fx.createEvent(i32);
+_ = fx.sample(.{
+    .clock  = clicked,
+    .source = .{ .a = count, .b = other },
     .fn_    = &struct {
         fn f(snap: zefx.shape.SnapshotTypeOf(
             struct { a: *zefx.Store(i32), b: *zefx.Store(i32) }
@@ -301,30 +316,32 @@ _ = zefx.sample(&eng, .{
             return snap.a + snap.b;
         }
     }.f,
-    .target = &sum_ev,
+    .target = sum_ev,
 });
 ```
 
 #### `forward` — pipe one unit to another
 
 ```zig
-_ = zefx.forward(&eng, &source_event, &target_event);
+const source_event = fx.createEvent(i32);
+const target_event = fx.createEvent(i32);
+_ = fx.forward(source_event, target_event);
 ```
 
 #### `restore` — create a store from an event
 
 ```zig
-const $last = zefx.restore(&eng, &clicked, 0);
+const $last = fx.restore(clicked, 0);
 // $last always holds the most recent value emitted by `clicked`
 ```
 
 ### Factory constructors
 
-Engine-managed allocation (auto-freed on `eng.deinit()`):
+Runtime/domain-managed allocation (auto-freed on `rt.deinit()`):
 
 ```zig
-const ev = zefx.createEvent(&eng, i32);
-const st = zefx.createStore(&eng, i32, 0);
+const ev = fx.createEvent(i32);
+const st = fx.createStore(i32, 0);
 ```
 
 ## Execution model
