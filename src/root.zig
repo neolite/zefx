@@ -13,6 +13,25 @@ pub const shape = @import("shape.zig");
 pub const sample = sample_mod.sample;
 pub const guard = sample_mod.guard;
 pub const Domain = App;
+pub const Runtime = struct {
+    gpa: std.heap.GeneralPurposeAllocator(.{}) = undefined,
+    domain: Domain = undefined,
+
+    pub fn init(self: *Runtime) void {
+        self.gpa = .{};
+        self.domain = createDomain(self.gpa.allocator());
+    }
+
+    pub fn deinit(self: *Runtime) void {
+        self.domain.deinit();
+        _ = self.gpa.deinit();
+    }
+
+    pub fn fx(self: *Runtime) BoundDomain {
+        return bind(&self.domain);
+    }
+};
+
 pub const BoundDomain = struct {
     domain: *Domain,
 
@@ -567,4 +586,39 @@ test "bound domain facade works without explicit domain pointer in calls" {
     try std.testing.expectEqual(@as(i32, 5), count.getState());
     try std.testing.expectEqual(@as(i32, 10), doubled.getState());
     try std.testing.expectEqual(@as(i32, 3), last_inc.getState());
+}
+
+test "runtime wrapper supports counter flow" {
+    var rt: Runtime = undefined;
+    rt.init();
+    defer rt.deinit();
+
+    const fx = rt.fx();
+    const inc = fx.createEvent(i32);
+    const count = fx.createStore(i32, 0);
+
+    const Probe = struct {
+        var calls: usize = 0;
+        var last: i32 = -1;
+        fn watch(v: i32) void {
+            calls += 1;
+            last = v;
+        }
+    };
+    Probe.calls = 0;
+    Probe.last = -1;
+
+    _ = count.on(inc, &struct {
+        fn reduce(state: i32, payload: i32) ?i32 {
+            return state + payload;
+        }
+    }.reduce);
+    _ = count.subscribe(&Probe.watch);
+
+    inc.emit(5);
+    inc.emit(3);
+
+    try std.testing.expectEqual(@as(i32, 8), count.getState());
+    try std.testing.expectEqual(@as(usize, 2), Probe.calls);
+    try std.testing.expectEqual(@as(i32, 8), Probe.last);
 }

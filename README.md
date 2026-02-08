@@ -24,12 +24,10 @@ const std = @import("std");
 const zefx = @import("zefx");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    var domain = zefx.createDomain(gpa.allocator());
-    defer domain.deinit();
-    const fx = zefx.bind(&domain);
+    var rt: zefx.Runtime = undefined;
+    rt.init();
+    defer rt.deinit();
+    const fx = rt.fx();
 
     const inc = fx.createEvent(i32);
     const count = fx.createStore(i32, 0);
@@ -110,13 +108,33 @@ Store and event aliases available:
 If you want calls without `&domain` at use sites, bind once:
 
 ```zig
-var domain = zefx.createDomain(allocator);
-defer domain.deinit();
+var rt: zefx.Runtime = undefined;
+rt.init();
+defer rt.deinit();
 
-const fx = zefx.bind(&domain);
+const fx = rt.fx();
 const inc = fx.createEvent(i32);
 const count = fx.createStore(i32, 0);
 _ = count.on(inc, &struct { fn r(s: i32, x: i32) ?i32 { return s + x; } }.r);
+```
+
+Counter example with runtime:
+
+```zig
+var rt: zefx.Runtime = undefined;
+rt.init();
+defer rt.deinit();
+const fx = rt.fx();
+
+const inc = fx.createEvent(i32);
+const dec = fx.createEvent(i32);
+const count = fx.createStore(i32, 0);
+_ = count.on(inc, &struct { fn r(s: i32, p: i32) ?i32 { return s + p; } }.r);
+_ = count.on(dec, &struct { fn r(s: i32, p: i32) ?i32 { return s - p; } }.r);
+
+inc.emit(10);
+dec.emit(3);
+// count.getState() == 7
 ```
 
 ## Effector-style todo model example
