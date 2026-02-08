@@ -20,20 +20,23 @@ exe.root_module.addImport("zefx", zefx_dep.module("zefx"));
 ## Quick start
 
 ```zig
+const std = @import("std");
 const zefx = @import("zefx");
 
-var eng = zefx.Engine.init(allocator);
-defer eng.deinit();
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+defer _ = gpa.deinit();
+
+var domain = zefx.createDomain(gpa.allocator());
+defer domain.deinit();
+const fx = zefx.bind(&domain);
 
 // Events — facts that happened
-var clicked = zefx.Event(i32){ .eng = &eng };
-defer clicked.deinit();
+const clicked = fx.createEvent(i32);
 
 // Stores — reactive state
-var $count = zefx.Store(i32){ .eng = &eng, .value = 0, .prev = 0 };
-defer $count.deinit();
+const $count = fx.createStore(i32, 0);
 
-_ = $count.on(&clicked, &struct {
+_ = $count.on(clicked, &struct {
     fn r(state: i32, payload: i32) ?i32 { return state + payload; }
 }.r);
 
@@ -107,6 +110,18 @@ Store and event aliases available:
 - `store.getState()` / `store.setState(v)`
 - `store.subscribe(cb)` / `store.unsubscribe(sub)`
 - `event.subscribe(cb)` / `event.unsubscribe(sub)`
+
+If you want calls without `&domain` at use sites, bind once:
+
+```zig
+var domain = zefx.createDomain(allocator);
+defer domain.deinit();
+
+const fx = zefx.bind(&domain);
+const inc = fx.createEvent(i32);
+const count = fx.createStore(i32, 0);
+_ = count.on(inc, &struct { fn r(s: i32, x: i32) ?i32 { return s + x; } }.r);
+```
 
 ## Effector-style todo model example
 

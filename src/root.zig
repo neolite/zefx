@@ -13,6 +13,48 @@ pub const shape = @import("shape.zig");
 pub const sample = sample_mod.sample;
 pub const guard = sample_mod.guard;
 pub const Domain = App;
+pub const BoundDomain = struct {
+    domain: *Domain,
+
+    pub fn event(self: BoundDomain, comptime T: type) *Event(T) {
+        return allocEvent(&self.domain.eng, T);
+    }
+
+    pub fn createEvent(self: BoundDomain, comptime T: type) *Event(T) {
+        return self.event(T);
+    }
+
+    pub fn store(self: BoundDomain, comptime T: type, initial: T) *Store(T) {
+        return allocStore(&self.domain.eng, T, initial);
+    }
+
+    pub fn createStore(self: BoundDomain, comptime T: type, initial: T) *Store(T) {
+        return self.store(T, initial);
+    }
+
+    pub fn sample(self: BoundDomain, opts: anytype) @TypeOf(sample_mod.sample(&self.domain.eng, opts)) {
+        return sample_mod.sample(&self.domain.eng, opts);
+    }
+
+    pub fn guard(self: BoundDomain, opts: anytype) @TypeOf(sample_mod.guard(&self.domain.eng, opts)) {
+        return sample_mod.guard(&self.domain.eng, opts);
+    }
+
+    pub fn forward(self: BoundDomain, from: anytype, to: anytype) @TypeOf(sample_mod.sample(&self.domain.eng, .{ .clock = from, .source = from, .target = to })) {
+        return sample_mod.sample(&self.domain.eng, .{ .clock = from, .source = from, .target = to });
+    }
+
+    pub fn restore(self: BoundDomain, ev: anytype, initial: @typeInfo(@TypeOf(ev)).pointer.child.Payload) *Store(@typeInfo(@TypeOf(ev)).pointer.child.Payload) {
+        const T = @typeInfo(@TypeOf(ev)).pointer.child.Payload;
+        const st = allocStore(&self.domain.eng, T, initial);
+        _ = st.on(ev, &struct {
+            fn reduce(_: T, x: T) ?T {
+                return x;
+            }
+        }.reduce);
+        return st;
+    }
+};
 
 fn allocEvent(eng: *Engine, comptime T: type) *Event(T) {
     const ev = eng.allocator.create(Event(T)) catch @panic("OOM");
@@ -101,6 +143,10 @@ pub fn createApp(allocator: std.mem.Allocator) App {
 
 pub fn createDomain(allocator: std.mem.Allocator) Domain {
     return Domain.init(allocator);
+}
+
+pub fn bind(domain: *Domain) BoundDomain {
+    return .{ .domain = domain };
 }
 
 pub fn createEvent(eng: *Engine, comptime T: type) *Event(T) {
@@ -486,4 +532,39 @@ test "createDomain is an alias for createApp style API" {
 
     inc.emit(7);
     try std.testing.expectEqual(@as(i32, 7), count.getState());
+}
+
+test "bound domain facade works without explicit domain pointer in calls" {
+    var domain = createDomain(std.testing.allocator);
+    defer domain.deinit();
+    const fx = bind(&domain);
+
+    const inc = fx.createEvent(i32);
+    const count = fx.createStore(i32, 0);
+    const doubled = fx.createStore(i32, 0);
+    const last_inc = fx.restore(inc, -1);
+
+    _ = count.on(inc, &struct {
+        fn reduce(state: i32, payload: i32) ?i32 {
+            return state + payload;
+        }
+    }.reduce);
+
+    _ = fx.sample(.{
+        .clock = inc,
+        .source = count,
+        .fn_ = &struct {
+            fn map(v: i32) i32 {
+                return v * 2;
+            }
+        }.map,
+        .target = doubled,
+    });
+
+    inc.emit(2);
+    inc.emit(3);
+
+    try std.testing.expectEqual(@as(i32, 5), count.getState());
+    try std.testing.expectEqual(@as(i32, 10), doubled.getState());
+    try std.testing.expectEqual(@as(i32, 3), last_inc.getState());
 }
