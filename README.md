@@ -23,32 +23,49 @@ exe.root_module.addImport("zefx", zefx_dep.module("zefx"));
 const std = @import("std");
 const zefx = @import("zefx");
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-defer _ = gpa.deinit();
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
 
-var domain = zefx.createDomain(gpa.allocator());
-defer domain.deinit();
-const fx = zefx.bind(&domain);
+    var domain = zefx.createDomain(gpa.allocator());
+    defer domain.deinit();
+    const fx = zefx.bind(&domain);
 
-// Events — facts that happened
-const clicked = fx.createEvent(i32);
+    const inc = fx.createEvent(i32);
+    const dec = fx.createEvent(i32);
+    const count = fx.createStore(i32, 0);
 
-// Stores — reactive state
-const $count = fx.createStore(i32, 0);
+    _ = count.on(inc, &struct { fn r(s: i32, p: i32) ?i32 { return s + p; } }.r);
+    _ = count.on(dec, &struct { fn r(s: i32, p: i32) ?i32 { return s - p; } }.r);
 
-_ = $count.on(clicked, &struct {
-    fn r(state: i32, payload: i32) ?i32 { return state + payload; }
-}.r);
+    const sub = count.subscribe(&struct {
+        fn render(v: i32) void {
+            std.debug.print("\x1b[2J\x1b[H", .{}); // clear screen
+            std.debug.print("zefx counter (TUI)\n", .{});
+            std.debug.print("count = {d}\n\n", .{v});
+            std.debug.print("Press '+' or '-' then Enter. Press 'q' to quit.\n", .{});
+        }
+    }.render);
+    defer count.unsubscribe(sub);
 
-// Watch — side effects (logging, rendering)
-_ = $count.watch(&struct {
-    fn w(v: i32) void {
-        std.debug.print("count = {d}\n", .{v});
+    count.setState(0); // initial render
+
+    const input = std.io.getStdIn().reader();
+    while (true) {
+        const ch = input.readByte() catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+
+        switch (ch) {
+            '+' => inc.emit(1),
+            '-' => dec.emit(1),
+            'q' => break,
+            '\n', '\r' => {},
+            else => {},
+        }
     }
-}.w);
-
-clicked.emit(5);  // → count = 5
-clicked.emit(3);  // → count = 8
+}
 ```
 
 ## JS-like facade
