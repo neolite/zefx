@@ -239,6 +239,53 @@ std.debug.print("total={d}, completed={d}\n", .{
 | `Engine` | Owns the reactive graph. Two-phase flush: pure reducers → effect watchers |
 | `Event(T)` | A signal carrying payload `T`. Emit to trigger the graph |
 | `Store(T)` | Holds state `T`. Updated by `.on(event, reducer)` or `.set(value)` |
+| `Effect(P,R,E)` | Wraps a handler `fn(P) E!R`. Derived units: `done`, `fail`, `finally_`, `pending` |
+
+### `createEffect` — wrap a handler with done/fail/pending
+
+```zig
+const zefx = @import("zefx");
+
+var rt: zefx.Runtime = undefined;
+rt.init();
+defer rt.deinit();
+const fx = rt.fx();
+
+const FxErr = error{NotFound};
+
+const fetchFx = fx.createEffect(i32, []const u8, FxErr, &struct {
+    fn handler(id: i32) FxErr![]const u8 {
+        if (id == 0) return error.NotFound;
+        return "ok";
+    }
+}.handler);
+
+// Derived stores/events — created automatically
+const $pending = fetchFx.pending;   // *Store(bool)
+const $result = fx.createStore([]const u8, "");
+const $error_ = fx.createStore(?FxErr, null);
+
+// Wire done/fail into stores using the graph
+_ = $result.on(fetchFx.done, &struct {
+    fn r(_: []const u8, d: zefx.Effect(i32, []const u8, FxErr).DoneData) ?[]const u8 {
+        return d.result;
+    }
+}.r);
+_ = $error_.on(fetchFx.fail, &struct {
+    fn r(_: ?FxErr, d: zefx.Effect(i32, []const u8, FxErr).FailData) ??FxErr {
+        return d.err;
+    }
+}.r);
+
+fetchFx.run(42);
+// $result.getState() == "ok"
+// $pending.getState() == false
+
+fetchFx.run(0);
+// $error_.getState() == error.NotFound
+```
+
+`run(params)` schedules the handler in the effects phase. On success it emits `done`, on error — `fail`. Both emit `finally_`. The `pending` store is `true` while the handler runs, `false` after.
 
 ### Operators
 
@@ -342,6 +389,7 @@ Runtime/domain-managed allocation (auto-freed on `rt.deinit()`):
 ```zig
 const ev = fx.createEvent(i32);
 const st = fx.createStore(i32, 0);
+const ef = fx.createEffect(i32, i32, error{Fail}, &handler);
 ```
 
 ## Execution model
