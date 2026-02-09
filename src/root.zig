@@ -2,6 +2,7 @@ const std = @import("std");
 const event_mod = @import("event.zig");
 const store_mod = @import("store.zig");
 const sample_mod = @import("sample.zig");
+const effect_mod = @import("effect.zig");
 
 pub const Engine = @import("engine.zig").Engine;
 pub const Thunk = @import("engine.zig").Thunk;
@@ -9,6 +10,7 @@ pub const Subscription = @import("engine.zig").Subscription;
 pub const Phase = @import("engine.zig").Phase;
 pub const Event = event_mod.Event;
 pub const Store = store_mod.Store;
+pub const Effect = effect_mod.Effect;
 pub const shape = @import("shape.zig");
 pub const sample = sample_mod.sample;
 pub const guard = sample_mod.guard;
@@ -63,6 +65,14 @@ pub const BoundDomain = struct {
         return sample_mod.sample(&self.domain.eng, .{ .clock = from, .source = from, .target = to });
     }
 
+    pub fn effect(self: BoundDomain, comptime Params: type, comptime Result: type, comptime ErrSet: type, handler: *const fn (Params) ErrSet!Result) *Effect(Params, Result, ErrSet) {
+        return allocEffect(&self.domain.eng, Params, Result, ErrSet, handler);
+    }
+
+    pub fn createEffect(self: BoundDomain, comptime Params: type, comptime Result: type, comptime ErrSet: type, handler: *const fn (Params) ErrSet!Result) *Effect(Params, Result, ErrSet) {
+        return self.effect(Params, Result, ErrSet, handler);
+    }
+
     pub fn restore(self: BoundDomain, ev: anytype, initial: @typeInfo(@TypeOf(ev)).pointer.child.Payload) *Store(@typeInfo(@TypeOf(ev)).pointer.child.Payload) {
         const T = @typeInfo(@TypeOf(ev)).pointer.child.Payload;
         const st = allocStore(&self.domain.eng, T, initial);
@@ -99,6 +109,48 @@ fn allocStore(eng: *Engine, comptime T: type, initial: T) *Store(T) {
         }
     }.dtor);
     return st;
+}
+
+fn allocEffect(eng: *Engine, comptime Params: type, comptime Result: type, comptime ErrSet: type, handler: *const fn (Params) ErrSet!Result) *Effect(Params, Result, ErrSet) {
+    const E = Effect(Params, Result, ErrSet);
+    const DoneData = E.DoneData;
+    const FailData = E.FailData;
+
+    const fx = eng.allocator.create(E) catch @panic("OOM");
+    const done = allocEvent(eng, DoneData);
+    const fail = allocEvent(eng, FailData);
+    const finally_ = allocEvent(eng, E.FinallyData);
+    const pending = allocStore(eng, bool, false);
+
+    // pending = false on done or fail
+    _ = pending.on(done, &struct {
+        fn reduce(_: bool, _: DoneData) ?bool {
+            return false;
+        }
+    }.reduce);
+    _ = pending.on(fail, &struct {
+        fn reduce(_: bool, _: FailData) ?bool {
+            return false;
+        }
+    }.reduce);
+
+    fx.* = .{
+        .eng = eng,
+        .handler = handler,
+        .done = done,
+        .fail = fail,
+        .finally_ = finally_,
+        .pending = pending,
+    };
+
+    eng.trackGraphAlloc(@ptrCast(fx), &struct {
+        fn dtor(a: std.mem.Allocator, p: *anyopaque) void {
+            const e: *E = @ptrCast(@alignCast(p));
+            e.deinit();
+            a.destroy(e);
+        }
+    }.dtor);
+    return fx;
 }
 
 pub const App = struct {
@@ -140,6 +192,14 @@ pub const App = struct {
         return sample_mod.sample(&self.eng, .{ .clock = from, .source = from, .target = to });
     }
 
+    pub fn effect(self: *App, comptime Params: type, comptime Result: type, comptime ErrSet: type, handler: *const fn (Params) ErrSet!Result) *Effect(Params, Result, ErrSet) {
+        return allocEffect(&self.eng, Params, Result, ErrSet, handler);
+    }
+
+    pub fn createEffect(self: *App, comptime Params: type, comptime Result: type, comptime ErrSet: type, handler: *const fn (Params) ErrSet!Result) *Effect(Params, Result, ErrSet) {
+        return self.effect(Params, Result, ErrSet, handler);
+    }
+
     pub fn restore(self: *App, ev: anytype, initial: @typeInfo(@TypeOf(ev)).pointer.child.Payload) *Store(@typeInfo(@TypeOf(ev)).pointer.child.Payload) {
         const T = @typeInfo(@TypeOf(ev)).pointer.child.Payload;
         const st = allocStore(&self.eng, T, initial);
@@ -174,6 +234,10 @@ pub fn createEvent(eng: *Engine, comptime T: type) *Event(T) {
 
 pub fn createStore(eng: *Engine, comptime T: type, initial: T) *Store(T) {
     return allocStore(eng, T, initial);
+}
+
+pub fn createEffect_(eng: *Engine, comptime Params: type, comptime Result: type, comptime ErrSet: type, handler: *const fn (Params) ErrSet!Result) *Effect(Params, Result, ErrSet) {
+    return allocEffect(eng, Params, Result, ErrSet, handler);
 }
 
 // ─────────────────────────────────────────────
@@ -439,6 +503,44 @@ test "effects phase sees final derived state from pure phase" {
     try std.testing.expectEqual(@as(i32, 6), PhaseCheck.seen_tripled);
 }
 
+test "emit from watcher during effects is applied in same tick" {
+    var eng = Engine.init(std.testing.allocator);
+    defer eng.deinit();
+
+    const inc = createEvent(&eng, i32);
+    const mirrored_ev = createEvent(&eng, i32);
+    const count = createStore(&eng, i32, 0);
+    const mirrored = createStore(&eng, i32, 0);
+
+    _ = count.on(inc, &struct {
+        fn reduce(state: i32, payload: i32) ?i32 {
+            return state + payload;
+        }
+    }.reduce);
+    _ = mirrored.on(mirrored_ev, &struct {
+        fn reduce(_: i32, payload: i32) ?i32 {
+            return payload;
+        }
+    }.reduce);
+
+    const Relay = struct {
+        var ev_ptr: ?*Event(i32) = null;
+        fn onCount(v: i32) void {
+            ev_ptr.?.emit(v);
+        }
+    };
+    Relay.ev_ptr = mirrored_ev;
+    _ = count.watch(&Relay.onCount);
+
+    inc.emit(1);
+    try std.testing.expectEqual(@as(i32, 1), count.getState());
+    try std.testing.expectEqual(@as(i32, 1), mirrored.getState());
+
+    inc.emit(2);
+    try std.testing.expectEqual(@as(i32, 3), count.getState());
+    try std.testing.expectEqual(@as(i32, 3), mirrored.getState());
+}
+
 test "stress: many emits keep logic stable" {
     var eng = Engine.init(std.testing.allocator);
     defer eng.deinit();
@@ -621,4 +723,109 @@ test "runtime wrapper supports counter flow" {
     try std.testing.expectEqual(@as(i32, 8), count.getState());
     try std.testing.expectEqual(@as(usize, 2), Probe.calls);
     try std.testing.expectEqual(@as(i32, 8), Probe.last);
+}
+
+test "effect success path emits done and sets pending" {
+    var app = createApp(std.testing.allocator);
+    defer app.deinit();
+
+    const FxErr = error{Boom};
+    const fetchFx = app.effect(i32, i32, FxErr, &struct {
+        fn handler(params: i32) FxErr!i32 {
+            return params * 10;
+        }
+    }.handler);
+
+    const DoneProbe = struct {
+        var last_result: i32 = -1;
+        var last_params: i32 = -1;
+        fn watch(d: Effect(i32, i32, FxErr).DoneData) void {
+            last_result = d.result;
+            last_params = d.params;
+        }
+    };
+    DoneProbe.last_result = -1;
+    DoneProbe.last_params = -1;
+    _ = fetchFx.done.watch(&DoneProbe.watch);
+
+    fetchFx.run(5);
+
+    try std.testing.expectEqual(@as(i32, 50), DoneProbe.last_result);
+    try std.testing.expectEqual(@as(i32, 5), DoneProbe.last_params);
+    try std.testing.expectEqual(false, fetchFx.pending.get());
+}
+
+test "effect error path emits fail" {
+    var app = createApp(std.testing.allocator);
+    defer app.deinit();
+
+    const FxErr = error{Boom};
+    const fetchFx = app.effect(i32, i32, FxErr, &struct {
+        fn handler(_: i32) FxErr!i32 {
+            return error.Boom;
+        }
+    }.handler);
+
+    const FailProbe = struct {
+        var got_err: bool = false;
+        var last_params: i32 = -1;
+        fn watch(d: Effect(i32, i32, FxErr).FailData) void {
+            got_err = (d.err == error.Boom);
+            last_params = d.params;
+        }
+    };
+    FailProbe.got_err = false;
+    FailProbe.last_params = -1;
+    _ = fetchFx.fail.watch(&FailProbe.watch);
+
+    fetchFx.run(3);
+
+    try std.testing.expect(FailProbe.got_err);
+    try std.testing.expectEqual(@as(i32, 3), FailProbe.last_params);
+    try std.testing.expectEqual(false, fetchFx.pending.get());
+}
+
+test "effect pending store is false after completion" {
+    var app = createApp(std.testing.allocator);
+    defer app.deinit();
+
+    const FxErr = error{Oops};
+    const fx = app.effect(i32, i32, FxErr, &struct {
+        fn handler(p: i32) FxErr!i32 {
+            return p;
+        }
+    }.handler);
+
+    // Before run, pending is false
+    try std.testing.expectEqual(false, fx.pending.get());
+
+    fx.run(1);
+
+    // After synchronous effect completes, pending settles to false
+    try std.testing.expectEqual(false, fx.pending.get());
+}
+
+test "sample with effect.done as clock" {
+    var app = createApp(std.testing.allocator);
+    defer app.deinit();
+
+    const FxErr = error{Nope};
+    const fetchFx = app.effect(i32, i32, FxErr, &struct {
+        fn handler(p: i32) FxErr!i32 {
+            return p + 1;
+        }
+    }.handler);
+
+    const results = app.store(i32, 0);
+    _ = results.on(fetchFx.done, &struct {
+        fn reduce(_: i32, d: Effect(i32, i32, FxErr).DoneData) ?i32 {
+            return d.result;
+        }
+    }.reduce);
+
+    fetchFx.run(9);
+    try std.testing.expectEqual(@as(i32, 10), results.get());
+
+    fetchFx.run(19);
+    try std.testing.expectEqual(@as(i32, 20), results.get());
 }
